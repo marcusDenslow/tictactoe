@@ -124,283 +124,940 @@ class TicTacToe:
                 if self.board[r, c] == 0:
                     moves.append((r, c))
         return moves
+    
+    def copy(self):
+        """Create a deep copy of this game state"""
+        new_game = TicTacToe(self.size)
+        new_game.board = np.copy(self.board)
+        new_game.current_player = self.current_player
+        new_game.game_over = self.game_over
+        new_game.winner = self.winner
+        return new_game
 
-class TicTacToeAI:
-    def __init__(self, game, max_depth=None, max_time=None, find_best=True):
+
+class ScalableTicTacToeAI:
+    """An AI optimized for boards of any size with advanced tactical awareness"""
+    
+    def __init__(self, game, max_depth=None, max_time=None):
         self.game = game
         self.max_depth = max_depth if max_depth is not None else infinity
         self.max_time = max_time
         self.start_time = None
-        self.find_best = find_best  # If True, find best move; if False, find worst move
         self.time_up = False
+        
+        # Cache for position evaluation
+        self.evaluation_cache = {}
+        
+        # Adjust search parameters based on board size for optimal performance
+        self.size = game.size
+        self.win_length = game.win_length
+        
+        # Adaptive search depth based on board size
+        if self.size <= 3:
+            self.adaptive_depth = 9  # Full search for 3x3
+        elif self.size <= 4:
+            self.adaptive_depth = 6  # Reduced for 4x4
+        elif self.size <= 5:
+            self.adaptive_depth = 4  # Further reduced for 5x5
+        else:
+            self.adaptive_depth = 3  # Minimal for larger boards
+        
+        # Counter-threat parameters
+        self.enable_counter_threats = True        
+        
+        # Debug mode for detailed output
+        self.debug = False
     
-    def get_best_move(self):
+    def get_move(self):
+        """Find the best move for the current player"""
         available_moves = self.game.get_available_moves()
         
         if not available_moves:
             return None
         
-        # If it's the first move on a large board, choose a random move near center to save time
-        if len(available_moves) > self.game.size ** 2 - 2 and self.game.size >= 4:
-            center = self.game.size // 2
-            center_moves = [(r, c) for r, c in available_moves 
-                           if abs(r - center) <= 1 and abs(c - center) <= 1]
-            if center_moves:
-                return random.choice(center_moves)
-            return random.choice(available_moves)
+        player = self.game.current_player
+        opponent = -player
+        board = self.game.board
         
+        if self.debug:
+            print(f"AI starting move selection (board size: {self.size}, win length: {self.win_length})")
+        
+        # Special case for first moves on large boards
+        if np.count_nonzero(board) <= 1 and self.size >= 4:
+            center = self.size // 2
+            if board[center, center] == 0:
+                if self.debug:
+                    print("Taking center position")
+                return (center, center)
+            # Take near center if center is taken
+            for r in range(center-1, center+2):
+                for c in range(center-1, center+2):
+                    if 0 <= r < self.size and 0 <= c < self.size and board[r, c] == 0:
+                        return (r, c)
+        
+        # ------------------- TACTICAL DECISION HIERARCHY -------------------
+        
+        # 1. IMMEDIATE WIN: Can we win now?
+        winning_move = self.find_winning_move(player)
+        if winning_move:
+            if self.debug:
+                print(f"Found winning move: {winning_move}")
+            return winning_move
+        
+        # 2. IMMEDIATE BLOCK: Must we block opponent's win?
+        blocking_move = self.find_winning_move(opponent)
+        if blocking_move:
+            if self.debug:
+                print(f"Found blocking move: {blocking_move}")
+            return blocking_move
+        
+        # 3. FORK HANDLING: Check for opponent forks and our fork opportunities
+        
+        # 3a. Find all opponent fork moves
+        opponent_fork_moves = self.find_all_fork_moves(opponent)
+        
+        # If there are multiple opponent fork possibilities, we're likely in trouble
+        # but try our best counter-strategy
+        if opponent_fork_moves:
+            if self.debug:
+                print(f"Opponent fork threats detected at: {opponent_fork_moves}")
+            
+            if self.enable_counter_threats:
+                # 3b. Try to create a forcing threat that prevents opponent's fork
+                counter_threat = self.find_forcing_counter_threat(opponent_fork_moves)
+                if counter_threat:
+                    if self.debug:
+                        print(f"Found counter-threat: {counter_threat}")
+                    return counter_threat
+            
+            # 3c. If no counter-threat is possible, block one of the fork setups
+            # Choose the one that gives us the best position
+            if opponent_fork_moves:
+                best_block = self.find_best_fork_block(opponent_fork_moves)
+                if best_block:
+                    if self.debug:
+                        print(f"Blocking fork with: {best_block}")
+                    return best_block
+        
+        # 3d. Look for our own fork opportunities
+        fork_move = self.find_fork_move(player)
+        if fork_move:
+            if self.debug:
+                print(f"Creating our own fork at: {fork_move}")
+            return fork_move
+        
+        # ------------------- STRATEGIC POSITIONING -------------------
+        
+        # 4. CENTER AND STRATEGIC POSITIONS
+        # On small boards, take center if available
+        if self.size <= 5:
+            center = self.size // 2
+            if board[center, center] == 0:
+                if self.debug:
+                    print("Taking center position")
+                return (center, center)
+            
+            # If center is taken by opponent on 3x3, take a corner
+            if self.size == 3 and board[center, center] == opponent:
+                corners = [(0, 0), (0, 2), (2, 0), (2, 2)]
+                available_corners = [corner for corner in corners if board[corner[0], corner[1]] == 0]
+                if available_corners:
+                    corner_move = random.choice(available_corners)
+                    if self.debug:
+                        print(f"Taking corner: {corner_move}")
+                    return corner_move
+        
+        # 5. THREAT CREATION: Create an attacking threat if possible
+        threat_move = self.find_best_threat_move(player)
+        if threat_move:
+            if self.debug:
+                print(f"Creating threatening position at: {threat_move}")
+            return threat_move
+        
+        # ------------------- MINIMAX SEARCH -------------------
+        
+        # Start the minimax search timer
         self.start_time = time.time()
         self.time_up = False
+        self.evaluation_cache = {}  # Reset cache
         
-        best_score = -infinity if self.find_best else infinity
-        best_move = available_moves[0]
-        player = self.game.current_player
-        
-        # Iterative deepening when time limit is specified
+        # 6. Use iterative deepening minimax search with time limit
         if self.max_time is not None:
-            for depth in range(1, min(self.max_depth, 10) + 1):
+            max_search_depth = min(self.adaptive_depth, 10)
+            
+            best_move = available_moves[0]
+            best_score = -infinity
+            
+            for depth in range(2, max_search_depth + 1):
                 if self.time_up:
                     break
                 
-                current_best_score = -infinity if self.find_best else infinity
-                current_best_move = None
+                move, score = self.minimax_root(depth)
                 
-                for row, col in available_moves:
-                    # Make move
-                    self.game.board[row, col] = player
+                if not self.time_up:
+                    best_move = move
+                    best_score = score
                     
-                    # Calculate score
-                    if self.find_best:
-                        score = self.minimax(depth - 1, -infinity, infinity, False, player)
-                        if score > current_best_score:
-                            current_best_score = score
-                            current_best_move = (row, col)
-                    else:
-                        score = self.minimax(depth - 1, -infinity, infinity, True, player)
-                        if score < current_best_score:
-                            current_best_score = score
-                            current_best_move = (row, col)
-                    
-                    # Undo move
-                    self.game.board[row, col] = 0
-                    
-                    # Check time limit
-                    if self.max_time is not None and time.time() - self.start_time > self.max_time * 0.9:
-                        self.time_up = True
-                        break
-                
-                if current_best_move is not None and not self.time_up:
-                    best_move = current_best_move
-                    best_score = current_best_score
+                    if self.debug:
+                        print(f"Depth {depth} search found move {move} with score {score}")
         else:
-            # No time limit, use max_depth
-            for row, col in available_moves:
-                # Make move
-                self.game.board[row, col] = player
-                
-                # Calculate score
-                if self.find_best:
-                    score = self.minimax(self.max_depth - 1, -infinity, infinity, False, player)
-                    if score > best_score:
-                        best_score = score
-                        best_move = (row, col)
-                else:
-                    score = self.minimax(self.max_depth - 1, -infinity, infinity, True, player)
-                    if score < best_score:
-                        best_score = score
-                        best_move = (row, col)
-                
-                # Undo move
-                self.game.board[row, col] = 0
+            # Fixed depth search
+            depth = min(self.adaptive_depth, 10)
+            best_move, _ = self.minimax_root(depth)
+        
+        if self.debug:
+            print(f"Final AI choice: {best_move}")
         
         return best_move
     
-    def minimax(self, depth, alpha, beta, is_maximizing, player):
-        # Check time limit
-        if self.max_time is not None and time.time() - self.start_time > self.max_time * 0.9:
-            self.time_up = True
-            return 0
+    def find_forcing_counter_threat(self, opponent_fork_moves):
+        """
+        Find a move that creates an immediate threat forcing the opponent to respond,
+        preventing them from creating their fork.
+        This is a critical counter-tactic to opponent fork setups.
+        """
+        player = self.game.current_player
+        opponent = -player
         
-        # Check terminal conditions
-        game_result = self.evaluate_terminal(self.game.board, self.game.win_length)
-        if game_result != 0:
-            return game_result * (depth + 1) * player  # Adjust by depth for faster wins
+        # Track the best threat move and its score
+        best_move = None
+        best_score = -infinity
         
-        # Check if board is full (draw)
-        if not np.any(self.game.board == 0):
-            return 0
-        
-        # Check if reached max depth
-        if depth == 0:
-            return self.evaluate_position(self.game.board, player)
-        
-        available_moves = self.get_available_moves()
-        
-        if is_maximizing:
-            best_score = -infinity
-            for row, col in available_moves:
-                # Make move
-                self.game.board[row, col] = player
-                
-                # Recursively calculate score
-                score = self.minimax(depth - 1, alpha, beta, False, player)
-                
-                # Undo move
-                self.game.board[row, col] = 0
-                
-                if self.time_up:
-                    return best_score
-                
-                best_score = max(score, best_score)
-                alpha = max(alpha, best_score)
-                
-                # Alpha-beta pruning
-                if beta <= alpha:
-                    break
+        # First priority: Create a threat that forces a specific response
+        # but doesn't allow any of the opponent's fork moves
+        for move in self.game.get_available_moves():
+            # Skip if this move is one of the opponent's fork setups
+            if move in opponent_fork_moves:
+                continue
             
-            return best_score
-        else:
-            best_score = infinity
-            for row, col in available_moves:
-                # Make move
-                self.game.board[row, col] = -player
-                
-                # Recursively calculate score
-                score = self.minimax(depth - 1, alpha, beta, True, player)
-                
-                # Undo move
-                self.game.board[row, col] = 0
-                
-                if self.time_up:
-                    return best_score
-                
-                best_score = min(score, best_score)
-                beta = min(beta, best_score)
-                
-                # Alpha-beta pruning
-                if beta <= alpha:
-                    break
+            r, c = move
             
-            return best_score
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # See if this creates an immediate threat
+            threat_lines = self.find_threat_lines(player)
+            if len(threat_lines) > 0:
+                # For each threat line, check if blocking it prevents all fork moves
+                blocks_all_forks = True
+                
+                for line in threat_lines:
+                    # Find the empty position in the threat line
+                    empty_pos = None
+                    for pos in line:
+                        if self.game.board[pos] == 0:
+                            empty_pos = pos
+                            break
+                    
+                    # Check if blocking this threat allows opponent to create a fork
+                    self.game.board[empty_pos] = opponent  # Simulate opponent block
+                    
+                    # Can opponent still create a fork after blocking?
+                    can_still_fork = False
+                    for fork_move in opponent_fork_moves:
+                        if self.game.board[fork_move[0], fork_move[1]] == 0:  # If fork move is still available
+                            # Check if it still creates a fork
+                            self.game.board[fork_move[0], fork_move[1]] = opponent
+                            fork_count = self.count_winning_paths(opponent)
+                            self.game.board[fork_move[0], fork_move[1]] = 0
+                            
+                            if fork_count >= 2:
+                                can_still_fork = True
+                                break
+                    
+                    # Undo opponent's block
+                    self.game.board[empty_pos] = 0
+                    
+                    if can_still_fork:
+                        blocks_all_forks = False
+                        break
+                
+                # If this threat forces opponent to block and prevents all forks,
+                # it's an excellent counter-tactic
+                if blocks_all_forks:
+                    # Evaluate the resulting position
+                    score = self.evaluate_board()
+                    if score > best_score:
+                        best_score = score
+                        best_move = move
+            
+            # Undo our move
+            self.game.board[r, c] = 0
+        
+        # If we found a good counter-threat, return it
+        if best_move is not None:
+            return best_move
+        
+        # Second priority: Just create any threat that doesn't allow the opponent's fork
+        for move in self.game.get_available_moves():
+            # Skip if this move is one of the opponent's fork setups
+            if move in opponent_fork_moves:
+                continue
+            
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # See if this creates an immediate threat
+            almost_wins = self.count_almost_wins(player)
+            score = self.evaluate_board()
+            
+            # Undo our move
+            self.game.board[r, c] = 0
+            
+            # If this creates a threat and gives a better position
+            if almost_wins > 0 and score > best_score:
+                best_score = score
+                best_move = move
+        
+        # If we found a threat that doesn't allow opponent's fork, use it
+        if best_move is not None:
+            return best_move
+        
+        # If no good counter-threat is found, return None
+        return None
     
-    def evaluate_terminal(self, board, win_length):
+    def find_best_fork_block(self, opponent_fork_moves):
+        """Choose the best move to block opponent's fork setup"""
+        player = self.game.current_player
+        best_move = None
+        best_score = -infinity
+        
+        # Try each possible fork block
+        for move in opponent_fork_moves:
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # Evaluate this position
+            score = self.evaluate_board()
+            
+            # Also check if this creates any threats for us
+            our_threats = self.count_almost_wins(player)
+            score += our_threats * 10  # Bonus for creating our own threats
+            
+            # Undo the move
+            self.game.board[r, c] = 0
+            
+            # Keep track of best blocking move
+            if score > best_score:
+                best_score = score
+                best_move = move
+        
+        return best_move
+    
+    def find_threat_lines(self, player):
+        """Find all lines where player is one move away from winning"""
+        win_length = self.game.win_length
+        board = self.game.board
         size = self.game.size
+        threat_lines = []
         
         # Check rows
         for r in range(size):
             for c in range(size - win_length + 1):
-                if board[r, c] != 0:
-                    if np.all(board[r, c:c+win_length] == board[r, c]):
-                        return board[r, c]  # Someone won
+                window = board[r, c:c+win_length]
+                if np.sum(window == player) == win_length - 1 and np.sum(window == 0) == 1:
+                    # Create list of positions in this line
+                    line = [(r, c+i) for i in range(win_length)]
+                    threat_lines.append(line)
         
         # Check columns
         for c in range(size):
             for r in range(size - win_length + 1):
-                if board[r, c] != 0:
-                    if np.all(board[r:r+win_length, c] == board[r, c]):
-                        return board[r, c]  # Someone won
+                window = board[r:r+win_length, c]
+                if np.sum(window == player) == win_length - 1 and np.sum(window == 0) == 1:
+                    # Create list of positions in this line
+                    line = [(r+i, c) for i in range(win_length)]
+                    threat_lines.append(line)
         
         # Check diagonals (top-left to bottom-right)
         for r in range(size - win_length + 1):
             for c in range(size - win_length + 1):
-                if board[r, c] != 0:
-                    diagonal = True
-                    for i in range(1, win_length):
-                        if board[r+i, c+i] != board[r, c]:
-                            diagonal = False
-                            break
-                    if diagonal:
-                        return board[r, c]  # Someone won
+                window = [board[r+i, c+i] for i in range(win_length)]
+                if window.count(player) == win_length - 1 and window.count(0) == 1:
+                    # Create list of positions in this line
+                    line = [(r+i, c+i) for i in range(win_length)]
+                    threat_lines.append(line)
         
         # Check diagonals (top-right to bottom-left)
         for r in range(size - win_length + 1):
             for c in range(win_length - 1, size):
-                if board[r, c] != 0:
+                window = [board[r+i, c-i] for i in range(win_length)]
+                if window.count(player) == win_length - 1 and window.count(0) == 1:
+                    # Create list of positions in this line
+                    line = [(r+i, c-i) for i in range(win_length)]
+                    threat_lines.append(line)
+        
+        return threat_lines
+    
+    def minimax_root(self, depth):
+        """Root of minimax search to find the best move"""
+        available_moves = self.game.get_available_moves()
+        player = self.game.current_player
+        alpha = -infinity
+        beta = infinity
+        
+        best_score = -infinity
+        best_move = available_moves[0]
+        
+        # Try each available move
+        for move in available_moves:
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # Evaluate with minimax
+            score = self.minimax(depth-1, alpha, beta, False)
+            
+            # Undo the move
+            self.game.board[r, c] = 0
+            
+            # Check if we're out of time
+            if self.max_time and time.time() - self.start_time > self.max_time * 0.95:
+                self.time_up = True
+                break
+            
+            # Update best move
+            if score > best_score:
+                best_score = score
+                best_move = move
+            
+            # Alpha-beta update
+            alpha = max(alpha, best_score)
+        
+        return best_move, best_score
+    
+    def minimax(self, depth, alpha, beta, is_maximizing):
+        """Minimax algorithm with alpha-beta pruning"""
+        # Check for time limit
+        if self.max_time and time.time() - self.start_time > self.max_time * 0.95:
+            self.time_up = True
+            return 0
+        
+        # Create a board hash for caching
+        board_hash = hash(self.game.board.tobytes())
+        cache_key = (board_hash, depth, is_maximizing)
+        
+        # Check if we already evaluated this position
+        if cache_key in self.evaluation_cache:
+            return self.evaluation_cache[cache_key]
+        
+        player = self.game.current_player
+        opponent = -player
+        current_eval = self.evaluate_board()
+        
+        # Check for terminal state or max depth
+        if depth == 0 or abs(current_eval) > 9000 or not self.game.get_available_moves():
+            return current_eval
+        
+        # Maximizing player (AI)
+        if is_maximizing:
+            max_eval = -infinity
+            for move in self.game.get_available_moves():
+                r, c = move
+                
+                # Make move
+                self.game.board[r, c] = player
+                
+                # Recursively evaluate
+                eval = self.minimax(depth - 1, alpha, beta, False)
+                
+                # Undo move
+                self.game.board[r, c] = 0
+                
+                # Update max evaluation
+                max_eval = max(max_eval, eval)
+                
+                # Alpha-beta pruning
+                alpha = max(alpha, eval)
+                if beta <= alpha:
+                    break
+                
+                # Check time limit
+                if self.time_up:
+                    return max_eval
+            
+            # Cache the result
+            self.evaluation_cache[cache_key] = max_eval
+            return max_eval
+        
+        # Minimizing player (opponent)
+        else:
+            min_eval = infinity
+            for move in self.game.get_available_moves():
+                r, c = move
+                
+                # Make move
+                self.game.board[r, c] = opponent
+                
+                # Recursively evaluate
+                eval = self.minimax(depth - 1, alpha, beta, True)
+                
+                # Undo move
+                self.game.board[r, c] = 0
+                
+                # Update min evaluation
+                min_eval = min(min_eval, eval)
+                
+                # Alpha-beta pruning
+                beta = min(beta, eval)
+                if beta <= alpha:
+                    break
+                
+                # Check time limit
+                if self.time_up:
+                    return min_eval
+            
+            # Cache the result
+            self.evaluation_cache[cache_key] = min_eval
+            return min_eval
+    
+    def find_winning_move(self, player):
+        """Find a move that would immediately win the game for the given player"""
+        for move in self.game.get_available_moves():
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # Check if this wins
+            temp_game = self.game.copy()
+            temp_game.check_game_over()
+            
+            # Undo the move
+            self.game.board[r, c] = 0
+            
+            # If this move wins, return it
+            if temp_game.game_over and temp_game.winner == player:
+                return move
+        
+        return None
+    
+    def find_all_fork_moves(self, player):
+        """Find all moves that create a fork (two winning paths) for the given player"""
+        fork_moves = []
+        
+        for move in self.game.get_available_moves():
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # Count the number of winning paths this creates
+            winning_paths = self.count_winning_paths(player)
+            
+            # Undo the move
+            self.game.board[r, c] = 0
+            
+            # If this move creates multiple winning paths, it's a fork
+            if winning_paths >= 2:
+                fork_moves.append(move)
+        
+        return fork_moves
+    
+    def find_fork_move(self, player):
+        """Find a move that creates a fork (two winning paths) for the given player"""
+        # Try to find a direct fork
+        fork_moves = self.find_all_fork_moves(player)
+        if fork_moves:
+            return fork_moves[0]
+        
+        # If no immediate forks, look for good setup moves
+        best_setup_move = None
+        max_potential = 0
+        
+        for move in self.game.get_available_moves():
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # Calculate the fork potential
+            potential = self.calculate_fork_potential(player)
+            
+            # Undo the move
+            self.game.board[r, c] = 0
+            
+            # Update if this has better potential
+            if potential > max_potential:
+                max_potential = potential
+                best_setup_move = move
+        
+        # Return a good setup move if it has significant potential
+        threshold = 4 if self.size >= 5 else 3  # Higher threshold for larger boards
+        if max_potential >= threshold:
+            return best_setup_move
+        
+        return None
+    
+    def find_best_threat_move(self, player):
+        """Find the most strategically advantageous threat move"""
+        best_move = None
+        best_score = -infinity
+        
+        for move in self.game.get_available_moves():
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # See if this creates an immediate threat
+            threats = self.count_almost_wins(player)
+            
+            # If this creates a threat, evaluate the position
+            if threats > 0:
+                # Evaluate the resulting position
+                score = self.evaluate_board() + threats * 5
+                
+                # If this is a better threat than what we've seen so far
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+            
+            # Undo the move
+            self.game.board[r, c] = 0
+        
+        return best_move
+    
+    def calculate_fork_potential(self, player):
+        """Calculate how much potential this position has for creating forks"""
+        win_length = self.game.win_length
+        board = self.game.board
+        size = self.game.size
+        opponent = -player
+        
+        # Count "almost winning lines" - lines with player's pieces and just one or two empty spots
+        lines_with_potential = 0
+        
+        # Count different types of potential winning lines
+        almost_win_lines = 0  # One move away from winning
+        two_away_lines = 0    # Two moves away from winning
+        
+        # Check rows
+        for r in range(size):
+            for c in range(size - win_length + 1):
+                window = board[r, c:c+win_length]
+                player_count = np.sum(window == player)
+                empty_count = np.sum(window == 0)
+                opponent_count = np.sum(window == opponent)
+                
+                # Only consider lines without opponent pieces
+                if opponent_count == 0:
+                    if player_count == win_length - 1 and empty_count == 1:
+                        almost_win_lines += 1
+                    elif player_count == win_length - 2 and empty_count == 2:
+                        two_away_lines += 1
+                    elif player_count > 0 and empty_count > 0:
+                        lines_with_potential += 1  # General potential
+        
+        # Check columns
+        for c in range(size):
+            for r in range(size - win_length + 1):
+                window = board[r:r+win_length, c]
+                player_count = np.sum(window == player)
+                empty_count = np.sum(window == 0)
+                opponent_count = np.sum(window == opponent)
+                
+                if opponent_count == 0:
+                    if player_count == win_length - 1 and empty_count == 1:
+                        almost_win_lines += 1
+                    elif player_count == win_length - 2 and empty_count == 2:
+                        two_away_lines += 1
+                    elif player_count > 0 and empty_count > 0:
+                        lines_with_potential += 1
+        
+        # Check diagonals (top-left to bottom-right)
+        for r in range(size - win_length + 1):
+            for c in range(size - win_length + 1):
+                diag = [board[r+i, c+i] for i in range(win_length)]
+                player_count = diag.count(player)
+                empty_count = diag.count(0)
+                opponent_count = diag.count(opponent)
+                
+                if opponent_count == 0:
+                    if player_count == win_length - 1 and empty_count == 1:
+                        almost_win_lines += 1
+                    elif player_count == win_length - 2 and empty_count == 2:
+                        two_away_lines += 1
+                    elif player_count > 0 and empty_count > 0:
+                        lines_with_potential += 1
+        
+        # Check diagonals (top-right to bottom-left)
+        for r in range(size - win_length + 1):
+            for c in range(win_length - 1, size):
+                diag = [board[r+i, c-i] for i in range(win_length)]
+                player_count = diag.count(player)
+                empty_count = diag.count(0)
+                opponent_count = diag.count(opponent)
+                
+                if opponent_count == 0:
+                    if player_count == win_length - 1 and empty_count == 1:
+                        almost_win_lines += 1
+                    elif player_count == win_length - 2 and empty_count == 2:
+                        two_away_lines += 1
+                    elif player_count > 0 and empty_count > 0:
+                        lines_with_potential += 1
+        
+        # Calculate fork potential score
+        # Weight almost-win lines heavily as they're most important for forks
+        potential_score = (almost_win_lines * 5) + (two_away_lines * 2) + lines_with_potential
+        
+        # Consider center control for additional strategic value
+        center = size // 2
+        if size % 2 == 1 and board[center, center] == player:
+            potential_score += 2
+        
+        # For 3x3, corners are important
+        if size == 3:
+            corners = [(0, 0), (0, 2), (2, 0), (2, 2)]
+            for r, c in corners:
+                if board[r, c] == player:
+                    potential_score += 1
+        
+        return potential_score
+    
+    def count_winning_paths(self, player):
+        """Count how many winning paths (one move away from win) exist for the player"""
+        win_paths = 0
+        win_length = self.game.win_length
+        board = self.game.board
+        size = self.game.size
+        
+        # Check all empty positions
+        for move in self.game.get_available_moves():
+            r, c = move
+            
+            # Try the move
+            board[r, c] = player
+            
+            # Check if this would win
+            
+            # Horizontal
+            for col in range(max(0, c - win_length + 1), min(c + 1, size - win_length + 1)):
+                window = board[r, col:col+win_length]
+                if np.all(window == player):
+                    win_paths += 1
+                    break
+            
+            # Vertical
+            for row in range(max(0, r - win_length + 1), min(r + 1, size - win_length + 1)):
+                window = board[row:row+win_length, c]
+                if np.all(window == player):
+                    win_paths += 1
+                    break
+            
+            # Diagonal (top-left to bottom-right)
+            for i in range(win_length):
+                if 0 <= r - i < size and 0 <= c - i < size and r - i + win_length <= size and c - i + win_length <= size:
                     diagonal = True
-                    for i in range(1, win_length):
-                        if board[r+i, c-i] != board[r, c]:
+                    for j in range(win_length):
+                        if board[r-i+j, c-i+j] != player:
                             diagonal = False
                             break
                     if diagonal:
-                        return board[r, c]  # Someone won
+                        win_paths += 1
+                        break
+            
+            # Diagonal (top-right to bottom-left)
+            for i in range(win_length):
+                if 0 <= r - i < size and 0 <= c + i < size and r - i + win_length <= size and c + i - win_length + 1 >= 0:
+                    diagonal = True
+                    for j in range(win_length):
+                        if board[r-i+j, c+i-j] != player:
+                            diagonal = False
+                            break
+                    if diagonal:
+                        win_paths += 1
+                        break
+            
+            # Undo the move
+            board[r, c] = 0
         
-        return 0  # No winner
+        return win_paths
     
-    def get_available_moves(self):
-        moves = []
-        for r in range(self.game.size):
-            for c in range(self.game.size):
-                if self.game.board[r, c] == 0:
-                    moves.append((r, c))
-        return moves
-    
-    def evaluate_position(self, board, player):
-        # Heuristic evaluation for non-terminal positions
-        score = 0
-        size = self.game.size
+    def evaluate_board(self):
+        """Evaluate the current board position"""
+        player = self.game.current_player
+        opponent = -player
+        board = self.game.board
         win_length = self.game.win_length
+        size = self.game.size
         
-        # Check for potential winning lines
+        # Check for actual win/loss
+        temp_game = self.game.copy()
+        temp_game.check_game_over()
         
-        # Rows
+        if temp_game.game_over:
+            if temp_game.winner == player:
+                return 10000  # Win
+            elif temp_game.winner == opponent:
+                return -10000  # Loss
+            else:
+                return 0  # Draw
+        
+        # Calculate a score based on potential winning lines
+        score = 0
+        
+        # Check rows
         for r in range(size):
             for c in range(size - win_length + 1):
                 window = board[r, c:c+win_length]
                 score += self.evaluate_window(window, player)
         
-        # Columns
+        # Check columns
         for c in range(size):
             for r in range(size - win_length + 1):
                 window = board[r:r+win_length, c]
                 score += self.evaluate_window(window, player)
         
-        # Diagonals (top-left to bottom-right)
+        # Check diagonals (top-left to bottom-right)
         for r in range(size - win_length + 1):
             for c in range(size - win_length + 1):
-                window = np.array([board[r+i, c+i] for i in range(win_length)])
+                window = [board[r+i, c+i] for i in range(win_length)]
                 score += self.evaluate_window(window, player)
         
-        # Diagonals (top-right to bottom-left)
+        # Check diagonals (top-right to bottom-left)
         for r in range(size - win_length + 1):
             for c in range(win_length - 1, size):
-                window = np.array([board[r+i, c-i] for i in range(win_length)])
+                window = [board[r+i, c-i] for i in range(win_length)]
                 score += self.evaluate_window(window, player)
         
-        # Favor center positions
+        # Value center positions more on larger boards
         center = size // 2
-        if size % 2 == 1:  # Odd size board has a single center
+        center_value = 3 if size <= 3 else 2  # Less important on larger boards
+        
+        if size % 2 == 1:  # Odd size has a center point
             if board[center, center] == player:
-                score += 3
-            elif board[center, center] == -player:
-                score -= 3
-        else:  # Even size board has 4 centers
-            center_window = board[center-1:center+1, center-1:center+1]
-            score += np.sum(center_window == player) * 2
-            score -= np.sum(center_window == -player) * 2
+                score += center_value
+            elif board[center, center] == opponent:
+                score -= center_value
+        else:  # Even size has 4 centers
+            center_area = board[center-1:center+1, center-1:center+1]
+            score += np.sum(center_area == player) * (center_value // 2)
+            score -= np.sum(center_area == opponent) * (center_value // 2)
+        
+        # Special strategic evaluations
+        
+        # Count number of threats (almost-wins)
+        player_threats = self.count_almost_wins(player)
+        opponent_threats = self.count_almost_wins(opponent)
+        
+        # Threats are more valuable on larger boards
+        threat_value = 5 if size <= 3 else 8
+        score += player_threats * threat_value
+        score -= opponent_threats * (threat_value + 5)  # Opponent threats more dangerous
+        
+        # Fork potential evaluation
+        player_fork_potential = self.count_fork_potential(player)
+        opponent_fork_potential = self.count_fork_potential(opponent)
+        
+        # Fork potential is critically important
+        score += player_fork_potential * 25
+        score -= opponent_fork_potential * 40  # Opponent forks are very dangerous
         
         return score
     
     def evaluate_window(self, window, player):
-        # Evaluate a single window (row, column, or diagonal segment)
-        score = 0
+        """Evaluate a single window (row, column, or diagonal segment)"""
         opponent = -player
+        win_length = self.game.win_length
+        
+        if not isinstance(window, np.ndarray):
+            window = np.array(window)
         
         player_count = np.sum(window == player)
         opponent_count = np.sum(window == opponent)
         empty_count = np.sum(window == 0)
         
-        # Scoring based on piece counts in window
-        if player_count == self.game.win_length:
-            score += 100  # Winning window
-        elif player_count == self.game.win_length - 1 and empty_count == 1:
-            score += 10  # One move away from winning
-        elif player_count == self.game.win_length - 2 and empty_count == 2:
-            score += 1  # Two moves away from winning
+        # Can't win in this window if both players have pieces in it
+        if opponent_count > 0 and player_count > 0:
+            return 0
         
-        if opponent_count == self.game.win_length - 1 and empty_count == 1:
-            score -= 8  # Block opponent's winning move
+        score = 0
+        
+        # Potential win for player
+        if opponent_count == 0:
+            if player_count == win_length - 1 and empty_count == 1:
+                score += 100  # One away from winning
+            elif player_count == win_length - 2 and empty_count == 2:
+                score += 10   # Two away from winning
+            elif player_count > 0:
+                score += player_count  # Some potential
+        
+        # Potential win for opponent
+        if player_count == 0:
+            if opponent_count == win_length - 1 and empty_count == 1:
+                score -= 120  # Block opponent win (high priority)
+            elif opponent_count == win_length - 2 and empty_count == 2:
+                score -= 20   # Block opponent setup (increased priority)
+            elif opponent_count > 0:
+                score -= opponent_count  # Some concern
         
         return score
+    
+    def count_almost_wins(self, player):
+        """Count how many lines are one move away from winning"""
+        win_length = self.game.win_length
+        board = self.game.board
+        size = self.game.size
+        almost_wins = 0
+        
+        # Check rows
+        for r in range(size):
+            for c in range(size - win_length + 1):
+                window = board[r, c:c+win_length]
+                if np.sum(window == player) == win_length - 1 and np.sum(window == 0) == 1:
+                    almost_wins += 1
+        
+        # Check columns
+        for c in range(size):
+            for r in range(size - win_length + 1):
+                window = board[r:r+win_length, c]
+                if np.sum(window == player) == win_length - 1 and np.sum(window == 0) == 1:
+                    almost_wins += 1
+        
+        # Check diagonals (top-left to bottom-right)
+        for r in range(size - win_length + 1):
+            for c in range(size - win_length + 1):
+                window = [board[r+i, c+i] for i in range(win_length)]
+                if window.count(player) == win_length - 1 and window.count(0) == 1:
+                    almost_wins += 1
+        
+        # Check diagonals (top-right to bottom-left)
+        for r in range(size - win_length + 1):
+            for c in range(win_length - 1, size):
+                window = [board[r+i, c-i] for i in range(win_length)]
+                if window.count(player) == win_length - 1 and window.count(0) == 1:
+                    almost_wins += 1
+        
+        return almost_wins
+    
+    def count_fork_potential(self, player):
+        """Count how many moves could potentially create a fork"""
+        fork_potential = 0
+        
+        for move in self.game.get_available_moves():
+            r, c = move
+            
+            # Make the move
+            self.game.board[r, c] = player
+            
+            # Check if this creates multiple "almost" winning lines
+            almost_wins = self.count_almost_wins(player)
+            
+            # Undo the move
+            self.game.board[r, c] = 0
+            
+            # If this creates multiple "almost" winning lines, it has fork potential
+            if almost_wins >= 2:
+                fork_potential += 1
+        
+        return fork_potential
+
 
 def play_player_vs_player(board_size):
     game = TicTacToe(board_size)
@@ -441,17 +1098,17 @@ def play_player_vs_player(board_size):
 def play_player_vs_ai(board_size, ai_time_limit):
     game = TicTacToe(board_size)
     
-    # Calculate appropriate max_depth based on board size
-    if board_size == 3:
-        max_depth = 9  # Full depth for 3x3
-    elif board_size == 4:
-        max_depth = 6  # Reasonable depth for 4x4
-    elif board_size == 5:
-        max_depth = 4  # Limited depth for 5x5
+    # Set depth based on board size
+    if board_size <= 3:
+        max_depth = 9  # Full exploration for 3x3
+    elif board_size <= 4:
+        max_depth = 7  # Deep exploration for 4x4
+    elif board_size <= 5:
+        max_depth = 5  # Moderate exploration for 5x5
     else:
-        max_depth = 3  # Very limited depth for larger boards
+        max_depth = 4  # Limited depth for larger boards
     
-    ai = TicTacToeAI(game, max_depth=max_depth, max_time=ai_time_limit)
+    ai = ScalableTicTacToeAI(game, max_depth=max_depth, max_time=ai_time_limit)
     
     print("\nYou: X, AI: O")
     print(f"Win condition: Get {game.win_length} in a row")
@@ -482,7 +1139,7 @@ def play_player_vs_ai(board_size, ai_time_limit):
         else:  # AI player
             print("AI is thinking...")
             start_time = time.time()
-            move = ai.get_best_move()
+            move = ai.get_move()
             elapsed = time.time() - start_time
             
             if move:
@@ -502,20 +1159,19 @@ def play_player_vs_ai(board_size, ai_time_limit):
 def play_ai_vs_ai(board_size):
     game = TicTacToe(board_size)
     
-    # For larger boards, use smaller depths to keep the game moving
+    # For different AI strengths
     if board_size <= 3:
         max_depth = 9
     elif board_size <= 4:
-        max_depth = 6
+        max_depth = 7
     else:
-        max_depth = 4
+        max_depth = 5
     
-    # Smart AI (maximizing)
-    smart_ai = TicTacToeAI(game, max_depth=max_depth, max_time=2, find_best=True)
-    # Dumb AI (minimizing)
-    dumb_ai = TicTacToeAI(game, max_depth=max_depth, max_time=2, find_best=False)
+    # Both AIs use the ScalableTicTacToeAI now
+    ai1 = ScalableTicTacToeAI(game, max_depth=max_depth, max_time=3)
+    ai2 = ScalableTicTacToeAI(game, max_depth=max_depth-2, max_time=2)  # Second AI is slightly weaker
     
-    print("\nSmart AI (X) vs Dumb AI (O)")
+    print("\nAI 1 (X) vs AI 2 (O)")
     print(f"Win condition: Get {game.win_length} in a row")
     
     move_counter = 0
@@ -523,25 +1179,25 @@ def play_ai_vs_ai(board_size):
         game.display_board()
         move_counter += 1
         
-        if game.current_player == 1:  # Smart AI (X)
-            print("Smart AI is thinking...")
+        if game.current_player == 1:  # AI 1 (X)
+            print("AI 1 is thinking...")
             start_time = time.time()
-            move = smart_ai.get_best_move()
+            move = ai1.get_move()
             elapsed = time.time() - start_time
             
             if move:
                 row, col = move
-                print(f"Smart AI chose: {row + 1} {col + 1} (in {elapsed:.2f} seconds)")
+                print(f"AI 1 chose: {row + 1} {col + 1} (in {elapsed:.2f} seconds)")
                 game.make_move(row, col)
-        else:  # Dumb AI (O)
-            print("Dumb AI is thinking...")
+        else:  # AI 2 (O)
+            print("AI 2 is thinking...")
             start_time = time.time()
-            move = dumb_ai.get_best_move()
+            move = ai2.get_move()
             elapsed = time.time() - start_time
             
             if move:
                 row, col = move
-                print(f"Dumb AI chose: {row + 1} {col + 1} (in {elapsed:.2f} seconds)")
+                print(f"AI 2 chose: {row + 1} {col + 1} (in {elapsed:.2f} seconds)")
                 game.make_move(row, col)
         
         # Add a delay to watch the game
@@ -552,9 +1208,9 @@ def play_ai_vs_ai(board_size):
     if game.winner == 0:
         print("Game ended in a draw!")
     elif game.winner == 1:
-        print("Smart AI (X) wins!")
+        print("AI 1 (X) wins!")
     else:
-        print("Dumb AI (O) wins!")
+        print("AI 2 (O) wins!")
 
 def main():
     print("Welcome to Dynamic Tic Tac Toe!")
@@ -573,7 +1229,7 @@ def main():
     print("\nGame Modes:")
     print("1. Player vs Player")
     print("2. Player vs AI")
-    print("3. AI vs AI (Smart vs Dumb)")
+    print("3. AI vs AI")
     
     while True:
         try:
